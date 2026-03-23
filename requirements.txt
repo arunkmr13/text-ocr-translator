@@ -1,0 +1,17 @@
+# OCR + image processing
+opencv-python>=4.8,<5
+pytesseract>=0.3.10
+Pillow>=10.0
+numpy>=1.24
+
+# Translation + language detection
+deep-translator>=1.11
+langdetect>=1.0.9
+
+# Web framework
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# Templating (used by FastAPI for Jinja2)
+jinja2>=3.1
+python-multipart>=0.0.9

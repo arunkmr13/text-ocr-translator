@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Translate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,600;1,300&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* ── Dark theme (default) ── */
+  :root {
+    --bg:           #0d0d0f;
+    --surface:      #141418;
+    --border:       #2a2a32;
+    --accent:       #c8f060;
+    --accent-dim:   rgba(200,240,96,0.12);
+    --text:         #e8e8ed;
+    --text-muted:   #6b6b7a;
+    --text-dim:     #3d3d4a;
+    --red:          #ff5f5f;
+    --blue:         #60b4f0;
+    --img-bg:       #0a0a0c;
+    --radius:       10px;
+    --mono:         'DM Mono', monospace;
+    --serif:        'Fraunces', serif;
+  }
+
+  /* ── Light theme ── */
+  [data-theme="light"] {
+    --bg:           #f5f5f0;
+    --surface:      #ffffff;
+    --border:       #ddddd6;
+    --accent:       #5a8a00;
+    --accent-dim:   rgba(90,138,0,0.10);
+    --text:         #1a1a1f;
+    --text-muted:   #7a7a85;
+    --text-dim:     #b0b0bb;
+    --red:          #d93636;
+    --blue:         #1a6fb0;
+    --img-bg:       #ebebeb;
+  }
+
+  html { font-size: 16px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    transition: background 0.25s, color 0.25s;
+  }
+
+  /* ── Header ── */
+  header {
+    padding: 22px 40px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 1.05rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  header .subtitle {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    flex: 1;
+  }
+  .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    margin-right: 10px;
+    box-shadow: 0 0 8px var(--accent);
+    transition: background 0.25s, box-shadow 0.25s;
+  }
+
+  /* ── Theme toggle ── */
+  #themeToggle {
+    margin-left: auto;
+    width: 38px; height: 22px;
+    background: var(--border);
+    border: none;
+    border-radius: 11px;
+    cursor: pointer;
+    position: relative;
+    transition: background 0.25s;
+    flex-shrink: 0;
+  }
+  #themeToggle::after {
+    content: '';
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: transform 0.25s, background 0.25s;
+  }
+  [data-theme="light"] #themeToggle::after {
+    transform: translateX(16px);
+    background: var(--accent);
+  }
+  .theme-icon {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: 6px;
+    user-select: none;
+    transition: color 0.25s;
+  }
+
+  /* ── Layout ── */
+  main {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    flex: 1;
+  }
+
+  /* ── Left Panel ── */
+  .panel-left {
+    border-right: 1px solid var(--border);
+    padding: 32px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+  .section-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+
+  /* Upload zone */
+  .upload-zone {
+    border: 1.5px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 36px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+    background: var(--surface);
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+  .upload-zone input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer;
+    width: 100%; height: 100%;
+  }
+  .upload-icon { font-size: 2rem; margin-bottom: 10px; opacity: 0.4; }
+  .upload-zone p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.6; }
+  .upload-zone .file-name {
+    margin-top: 10px; font-size: 0.75rem; color: var(--accent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #sizeWarning { display:none; font-size:0.75rem; color:var(--red); margin-top:6px; }
+
+  /* Translate button */
+  .btn-primary {
+    width: 100%; padding: 14px;
+    background: var(--accent); color: var(--bg);
+    border: none; border-radius: var(--radius);
+    font-family: var(--mono); font-size: 0.85rem; font-weight: 500;
+    cursor: pointer; letter-spacing: 0.05em;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+  .btn-primary:hover  { opacity: 0.88; }
+  .btn-primary:active { transform: scale(0.98); }
+  .btn-primary:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+
+  /* Steps */
+  .steps { display:flex; flex-direction:column; }
+  .step {
+    display:flex; align-items:flex-start; gap:14px;
+    padding:12px 0; border-bottom:1px solid var(--border);
+    opacity:0.3; transition:opacity 0.3s;
+  }
+  .step:last-child { border-bottom:none; }
+  .step.active { opacity:1; }
+  .step.done   { opacity:0.7; }
+  .step-icon {
+    width:28px; height:28px; border-radius:50%;
+    border:1.5px solid var(--border);
+    display:flex; align-items:center; justify-content:center;
+    font-size:0.7rem; flex-shrink:0;
+    transition:all 0.3s; color:var(--text-muted);
+  }
+  .step.active .step-icon {
+    border-color:var(--accent); color:var(--accent);
+    box-shadow:0 0 10px var(--accent-dim);
+    animation:pulse 1.2s ease-in-out infinite;
+  }
+  .step.done .step-icon {
+    background:var(--accent); border-color:var(--accent);
+    color:var(--bg); animation:none;
+  }
+  @keyframes pulse {
+    0%,100% { box-shadow:0 0 6px var(--accent-dim); }
+    50%      { box-shadow:0 0 16px rgba(200,240,96,0.35); }
+  }
+  .step-text { flex:1; }
+  .step-title { font-size:0.78rem; color:var(--text); margin-bottom:2px; }
+  .step-desc  { font-size:0.68rem; color:var(--text-muted); }
+
+  /* Lang badge */
+  #langBadge {
+    display:none;
+    background:var(--accent-dim);
+    border:1px solid rgba(200,240,96,0.25);
+    border-radius:6px; padding:8px 12px;
+    font-size:0.72rem; color:var(--accent);
+  }
+  #langBadge span { color:var(--text-muted); }
+
+  /* Error / warning */
+  #errorBox {
+    display:none;
+    background:rgba(255,95,95,0.08);
+    border:1px solid rgba(255,95,95,0.3);
+    border-radius:var(--radius); padding:12px 14px;
+    font-size:0.75rem; color:var(--red); line-height:1.5;
+  }
+  #warningBar {
+    display:none;
+    background:rgba(96,180,240,0.08);
+    border:1px solid rgba(96,180,240,0.25);
+    border-radius:8px; padding:10px 14px;
+    font-size:0.73rem; color:var(--blue);
+  }
+
+  /* ── Right Panel ── */
+  .panel-right {
+    padding:32px 36px; display:flex;
+    flex-direction:column; gap:36px; overflow-y:auto;
+  }
+
+  /* Image grid */
+  .image-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .image-card {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); overflow:hidden;
+    transition:background 0.25s, border-color 0.25s;
+  }
+  .image-card-header {
+    padding:10px 14px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .image-card-header span {
+    font-size:0.65rem; letter-spacing:0.12em;
+    text-transform:uppercase; color:var(--text-muted);
+  }
+  .image-card img {
+    width:100%; display:block; max-height:320px;
+    object-fit:contain; background:var(--img-bg);
+  }
+  .image-placeholder {
+    height:200px; display:flex; align-items:center;
+    justify-content:center; color:var(--text-dim); font-size:0.75rem;
+  }
+
+  /* Text grid */
+  .text-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .text-card {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); overflow:hidden;
+    transition:background 0.25s, border-color 0.25s;
+  }
+  .text-card-header {
+    padding:10px 14px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .text-card-header span {
+    font-size:0.65rem; letter-spacing:0.12em;
+    text-transform:uppercase; color:var(--text-muted);
+  }
+  .text-card pre {
+    padding:16px; font-size:0.78rem; line-height:1.7;
+    color:var(--text); white-space:pre-wrap; word-break:break-word;
+    min-height:80px; font-family:var(--mono);
+  }
+  .text-card .empty-text {
+    padding:16px; font-size:0.75rem; color:var(--text-dim); min-height:80px;
+  }
+
+  /* Small buttons */
+  .btn-sm {
+    padding:5px 10px; background:transparent;
+    border:1px solid var(--border); border-radius:6px;
+    font-family:var(--mono); font-size:0.65rem; color:var(--text-muted);
+    cursor:pointer; letter-spacing:0.06em; transition:all 0.18s;
+    display:flex; align-items:center; gap:5px;
+  }
+  .btn-sm:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-dim); }
+  .btn-sm.copied { border-color:var(--accent); color:var(--accent); }
+  .btn-actions { display:flex; gap:6px; flex-wrap:wrap; }
+
+  @media (max-width:900px) {
+    main { grid-template-columns:1fr; }
+    .panel-left { border-right:none; border-bottom:1px solid var(--border); }
+    .image-grid, .text-grid { grid-template-columns:1fr; }
+    header { padding:16px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot"></span>Translate</h1>
+  <span class="subtitle">OCR · Auto-detect · Translate to English</span>
+  <button id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode"></button>
+  <span class="theme-icon" id="themeIcon">☀︎</span>
+</header>
+
+<main>
+  <aside class="panel-left">
+
+    <div>
+      <p class="section-label">Image Input</p>
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="imageInput" accept="image/jpeg,image/png,image/webp">
+        <div class="upload-icon">⬆</div>
+        <p>Drop image here or click to browse<br>JPEG · PNG · WebP</p>
+        <div class="file-name" id="fileName"></div>
+      </div>
+      <div id="sizeWarning">⚠ File exceeds 5 MB limit. Please choose a smaller image.</div>
+    </div>
+
+    <button class="btn-primary" id="translateBtn" onclick="runTranslation()" disabled>
+      Translate Image
+    </button>
+
+    <div id="errorBox"></div>
+
+    <div>
+      <p class="section-label">Pipeline</p>
+      <div class="steps">
+        <div class="step" id="step1">
+          <div class="step-icon" id="step1icon">1</div>
+          <div class="step-text">
+            <div class="step-title">OCR Scan</div>
+            <div class="step-desc">Extract text regions from image</div>
+          </div>
+        </div>
+        <div class="step" id="step2">
+          <div class="step-icon" id="step2icon">2</div>
+          <div class="step-text">
+            <div class="step-title">Language Detection</div>
+            <div class="step-desc">Identify source language automatically</div>
+          </div>
+        </div>
+        <div class="step" id="step3">
+          <div class="step-icon" id="step3icon">3</div>
+          <div class="step-text">
+            <div class="step-title">Translation</div>
+            <div class="step-desc">Translate detected text to English</div>
+          </div>
+        </div>
+        <div class="step" id="step4">
+          <div class="step-icon" id="step4icon">4</div>
+          <div class="step-text">
+            <div class="step-title">Render Output</div>
+            <div class="step-desc">Overlay translation on image</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="langBadge">
+      <span>Detected language: </span><strong id="langName">—</strong>
+    </div>
+
+  </aside>
+
+  <section class="panel-right">
+
+    <div id="warningBar"></div>
+
+    <div>
+      <p class="section-label">Images</p>
+      <div class="image-grid">
+        <div class="image-card">
+          <div class="image-card-header">
+            <span>Original</span>
+            <div class="btn-actions">
+              <button class="btn-sm" id="dlOriginal" onclick="downloadFile('original')" style="display:none">↓ JPG</button>
+            </div>
+          </div>
+          <div id="originalWrap"><div class="image-placeholder">No image yet</div></div>
+        </div>
+        <div class="image-card">
+          <div class="image-card-header">
+            <span>Translated Overlay</span>
+            <div class="btn-actions">
+              <button class="btn-sm" id="dlTranslated" onclick="downloadFile('translated')" style="display:none">↓ JPG</button>
+            </div>
+          </div>
+          <div id="translatedWrap"><div class="image-placeholder">No image yet</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <p class="section-label">Extracted Text</p>
+      <div class="text-grid">
+        <div class="text-card">
+          <div class="text-card-header">
+            <span>Source</span>
+            <div class="btn-actions">
+              <button class="btn-sm" id="copyExtracted" onclick="copyText('extracted')">⎘ Copy</button>
+              <button class="btn-sm" id="dlExtracted" onclick="downloadText('extracted')" style="display:none">↓ TXT</button>
+            </div>
+          </div>
+          <div class="empty-text" id="extractedWrap">Extracted text will appear here.</div>
+        </div>
+        <div class="text-card">
+          <div class="text-card-header">
+            <span>English</span>
+            <div class="btn-actions">
+              <button class="btn-sm" id="copyTranslated" onclick="copyText('translated')">⎘ Copy</button>
+              <button class="btn-sm" id="dlTranslatedTxt" onclick="downloadText('translated')" style="display:none">↓ TXT</button>
+            </div>
+          </div>
+          <div class="empty-text" id="translatedTextWrap">Translated text will appear here.</div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<script src="/static/script.js"></script>
+<script>
+  // ── Theme toggle ──────────────────────────────────────────────
+  function toggleTheme() {
+    const html = document.documentElement;
+    const isDark = html.getAttribute('data-theme') === 'dark';
+    html.setAttribute('data-theme', isDark ? 'light' : 'dark');
+    document.getElementById('themeIcon').textContent = isDark ? '☽' : '☀︎';
+    localStorage.setItem('theme', isDark ? 'light' : 'dark');
+  }
+
+  // Restore saved theme on load
+  (function() {
+    const saved = localStorage.getItem('theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+    document.getElementById('themeIcon').textContent = saved === 'light' ? '☽' : '☀︎';
+  })();
+</script>
+</body>
+</html>
