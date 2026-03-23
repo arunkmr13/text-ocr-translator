@@ -1,0 +1,25 @@
+services:
+  ocr-translator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocr-translator
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads_data:/app/uploads
+      - outputs_data:/app/outputs
+    environment:
+      - TESSERACT_CMD=/usr/bin/tesseract
+      - TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  uploads_data:
+  outputs_data:
