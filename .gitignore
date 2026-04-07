@@ -22,3 +22,5 @@ outputs/
 # IDE
 .vscode/
 .idea/
+.env
+.env
