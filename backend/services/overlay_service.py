@@ -1,12 +1,9 @@
 # overlay_service.py
 # Renders translated text IN-PLACE over original text regions.
-# Each OverlayBlock's bounding box is used to:
-#   1. Sample the background colour of that region
-#   2. Paint a filled rectangle to erase the original text
-#   3. Render the translated English text at the same position and scale
-#
-# Falls back to a clean bottom-panel if no bounding boxes are available.
-# Supports all scripts via Noto font family. Handles RTL (Arabic, Hebrew).
+# Uses Gemini bounding boxes to:
+#   1. Sample background colour of each region
+#   2. Paint a filled rectangle to erase original text
+#   3. Render translated English text at same position, auto-sized to fit
 
 from __future__ import annotations
 import textwrap
@@ -30,17 +27,17 @@ logger = logging.getLogger(__name__)
 FONT_DIR = Path(__file__).parent.parent / "assets" / "fonts"
 
 FONT_FILE_MAP: dict[str, str] = {
-    "NotoSans":             "NotoSans-Regular.ttf",
-    "NotoSansLao":          "NotoSansLao-Regular.ttf",
-    "NotoSansThai":         "NotoSansThai-Regular.ttf",
-    "NotoSansArabic":       "NotoSansArabic-Regular.ttf",
-    "NotoSansDevanagari":   "NotoSansDevanagari-Regular.ttf",
-    "NotoSansBengali":      "NotoSansBengali-Regular.ttf",
-    "NotoSansTamil":        "NotoSansTamil-Regular.ttf",
-    "NotoSansCJK":          "NotoSansCJK-Regular.ttc",
-    "NotoSansMyanmar":      "NotoSansMyanmar-Regular.ttf",
-    "NotoSansKhmer":        "NotoSansKhmer-Regular.ttf",
-    "NotoSansHebrew":       "NotoSansHebrew-Regular.ttf",
+    "NotoSans":           "NotoSans-Regular.ttf",
+    "NotoSansLao":        "NotoSansLao-Regular.ttf",
+    "NotoSansThai":       "NotoSansThai-Regular.ttf",
+    "NotoSansArabic":     "NotoSansArabic-Regular.ttf",
+    "NotoSansDevanagari": "NotoSansDevanagari-Regular.ttf",
+    "NotoSansBengali":    "NotoSansBengali-Regular.ttf",
+    "NotoSansTamil":      "NotoSansTamil-Regular.ttf",
+    "NotoSansCJK":        "NotoSansCJK-Regular.ttc",
+    "NotoSansMyanmar":    "NotoSansMyanmar-Regular.ttf",
+    "NotoSansKhmer":      "NotoSansKhmer-Regular.ttf",
+    "NotoSansHebrew":     "NotoSansHebrew-Regular.ttf",
 }
 
 _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
@@ -94,22 +91,17 @@ class OverlayBlock:
 # ---------------------------------------------------------------------------
 
 def _sample_bg_color(image: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[int, int, int]:
-    """
-    Sample the dominant background colour of a region by looking at its border pixels.
-    Returns an (R, G, B) tuple suitable for PIL.
-    """
+    """Sample dominant background colour using border pixels of the region."""
     ih, iw = image.shape[:2]
-    x  = max(0, min(x,  iw - 1))
-    y  = max(0, min(y,  ih - 1))
+    x  = max(0, min(x, iw - 1))
+    y  = max(0, min(y, ih - 1))
     x2 = max(0, min(x + w, iw))
     y2 = max(0, min(y + h, ih))
 
     if x2 <= x or y2 <= y:
         return (30, 30, 30)
 
-    region = image[y:y2, x:x2]   # BGR
-
-    # Use the border pixels (top row + bottom row + left col + right col)
+    region = image[y:y2, x:x2]
     border_pixels = np.concatenate([
         region[0, :],
         region[-1, :],
@@ -117,10 +109,9 @@ def _sample_bg_color(image: np.ndarray, x: int, y: int, w: int, h: int) -> tuple
         region[:, -1],
     ], axis=0)
 
-    # Median colour is robust to text pixels in the border sample
     median_bgr = np.median(border_pixels, axis=0).astype(int)
-    b, g, r = int(median_bgr[0]), int(median_bgr[1]), int(median_bgr[2])
-    return (r, g, b)
+    # BGR → RGB
+    return (int(median_bgr[2]), int(median_bgr[1]), int(median_bgr[0]))
 
 
 def _fit_font_size(
@@ -129,13 +120,9 @@ def _fit_font_size(
     max_width: int,
     max_height: int,
     font_name: str,
-    min_size: int = 8,
+    min_size: int = 6,
     max_size: int = 72,
 ) -> tuple[ImageFont.FreeTypeFont, int]:
-    """
-    Binary-search for the largest font size where text fits in (max_width × max_height).
-    Returns (font, size).
-    """
     lo, hi = min_size, max_size
     best_size = min_size
     while lo <= hi:
@@ -156,10 +143,9 @@ def _fit_font_size(
 
 
 def _choose_text_color(bg_rgb: tuple[int, int, int]) -> tuple[int, int, int, int]:
-    """Return black or white text colour depending on background luminance."""
     r, g, b = bg_rgb
     luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    return (10, 10, 10, 255) if luminance > 140 else (245, 245, 245, 255)
+    return (15, 15, 15, 255) if luminance > 140 else (245, 245, 245, 255)
 
 
 # ---------------------------------------------------------------------------
@@ -172,90 +158,80 @@ def _render_block_inplace(
     block: OverlayBlock,
     font_name: str,
     is_rtl: bool,
-    padding: int = 3,
+    padding: int = 2,
 ) -> None:
     x, y, w, h = block.x, block.y, block.width, block.height
     text = block.translated_text.strip()
     if not text:
         return
-    
-    # Skip blocks covering more than 40% of image width OR height — likely a bad bbox
+
     ih, iw = image_bgr.shape[:2]
-    if w > iw * 0.4 or h > ih * 0.4:
-        logger.warning("Skipping oversized block (%dx%d) for text: %s", w, h, text[:30])
+
+    # Skip blocks that are:
+    # - wider than 60% of image (full-width banners)
+    # - taller than 8% of image (large decorative boxes)
+    # - too small to render readable text
+    if w > iw * 0.60 or h > ih * 0.08 or h < 15:
+        logger.debug("Skipping oversized block (%dx%d): %s", w, h, text[:30])
+        return
+
+    # Clamp to image bounds
+    x  = max(0, min(x, iw - 1))
+    y  = max(0, min(y, ih - 1))
+    w  = min(w, iw - x)
+    h  = min(h, ih - y)
+
+    if w < 5 or h < 5:
+        return
+
+    # Skip single character or number-only translations (likely OCR noise)
+    if len(text) <= 1:
         return
 
     if is_rtl:
         text = _apply_rtl(text)
 
-    """
-    For a single OverlayBlock:
-      1. Sample background colour from the original image
-      2. Paint a filled rectangle to cover the original text
-      3. Render the translated text, auto-sized to fit
-    """
-    x, y, w, h = block.x, block.y, block.width, block.height
-    text = block.translated_text.strip()
-    if not text:
-        return
-
-    if is_rtl:
-        text = _apply_rtl(text)
-
-    # 1. Sample background
+    # 1. Sample background colour
     bg_rgb = _sample_bg_color(image_bgr, x, y, w, h)
 
-    # 2. Fill rectangle (erase original text)
-    # Slight inset so we don't bleed over adjacent elements
-    inset = 2
+    # 2. Fill rectangle to erase original text
     draw.rectangle(
-        [(x + inset, y + inset), (x + w - inset, y + h - inset)],
-        fill=(*bg_rgb, 210),  # less opaque so background shows through slightly
-)
+        [(x, y), (x + w, y + h)],
+        fill=(*bg_rgb, 230),
+    )
 
-    # 3. Fit font
-    inner_w = max(w - padding * 2, 10)
-    inner_h = max(h - padding * 2, 8)
+    # 3. Fit and render translated text
+    inner_w = max(w - padding * 2, 8)
+    inner_h = max(h - padding * 2, 6)
 
-    # Try to fit on one line first; if too long, wrap and shrink
     font, size = _fit_font_size(draw, text, inner_w, inner_h, font_name)
-
     text_color = _choose_text_color(bg_rgb)
 
-    # Attempt single-line; fall back to wrapped multi-line
     try:
         tb = draw.textbbox((0, 0), text, font=font)
-        text_w = tb[2] - tb[0]
+        tw = tb[2] - tb[0]
+        th = tb[3] - tb[1]
     except Exception:
-        text_w = size * len(text)
+        tw, th = size * len(text) * 0.6, size
 
-    if text_w <= inner_w:
-        # Single line — centre vertically and horizontally
-        try:
-            tb = draw.textbbox((0, 0), text, font=font)
-            th = tb[3] - tb[1]
-            tw = tb[2] - tb[0]
-        except Exception:
-            tw, th = text_w, size
+    if tw <= inner_w:
+        # Single line — centre in box
         tx = x + padding + max(0, (inner_w - tw) // 2)
         ty = y + padding + max(0, (inner_h - th) // 2)
-        # Shadow
         draw.text((tx + 1, ty + 1), text, font=font, fill=(0, 0, 0, 80))
         draw.text((tx, ty), text, font=font, fill=text_color)
     else:
-        # Multi-line wrap
+        # Wrap text
         try:
             avg_cw = draw.textlength("A", font=font)
         except Exception:
             avg_cw = size * 0.6
-        cpl = max(5, int(inner_w / max(avg_cw, 1)))
+        cpl = max(4, int(inner_w / max(avg_cw, 1)))
         lines = textwrap.wrap(text, width=cpl)
 
-        # Re-fit font to multi-line height
         line_h = size + 2
-        total_h = line_h * len(lines)
-        if total_h > inner_h and len(lines) > 1:
-            new_size = max(7, int(inner_h / len(lines)) - 2)
+        if line_h * len(lines) > inner_h and len(lines) > 1:
+            new_size = max(6, int(inner_h / len(lines)) - 2)
             font = _load_font(font_name, new_size)
             size = new_size
             line_h = size + 2
@@ -270,7 +246,7 @@ def _render_block_inplace(
 
 
 # ---------------------------------------------------------------------------
-# Fallback: bottom panel (used when no bounding boxes available)
+# Fallback: bottom panel
 # ---------------------------------------------------------------------------
 
 def _render_bottom_panel(
@@ -296,7 +272,7 @@ def _render_bottom_panel(
         avg_cw = draw.textlength("A", font=font)
     except Exception:
         avg_cw = font_size * 0.55
-    cpl = max(20, int(usable_width / max(avg_cw, 1)))
+    cpl     = max(20, int(usable_width / max(avg_cw, 1)))
     wrapped = textwrap.wrap(full_text, width=cpl)
 
     max_lines = min(len(wrapped), max(6, int(h * 0.38 / line_spacing)))
@@ -346,44 +322,30 @@ def overlay_translations(
     fill_alpha: float = 0.88,
 ) -> np.ndarray:
     """
-    Render translated text over the image.
-
-    If blocks have valid bounding boxes (x/y/width/height > 0), renders each
-    translation IN-PLACE by:
-      - sampling the background colour
-      - painting over the original text
-      - drawing the English translation at the correct position and scale
-
-    Falls back to a semi-transparent bottom panel when no bounding boxes
-    are available (e.g. Gemini didn't return coordinates).
-
-    Args:
-        image:           OpenCV BGR numpy array
-        blocks:          List of OverlayBlock with positions + translated text
-        language_result: Used for font selection and RTL flag
-        fill_alpha:      Opacity for fallback panel (ignored for in-place mode)
+    Render translated text over the image in-place.
+    Each block's bounding box is used to erase original text and
+    render the English translation at the exact same position.
+    Falls back to bottom panel if no bounding boxes available.
     """
     if not blocks:
         return image
 
     is_rtl    = (language_result.direction == "rtl") if language_result else False
-    font_name = "NotoSans"  # Translation is always English (LTR)
+    font_name = "NotoSans"
 
     h, w = image.shape[:2]
 
-    # Decide mode: in-place if ANY block has a real bounding box
     has_boxes = any(
         b.width > 0 and b.height > 0 and (b.x > 0 or b.y > 0)
         for b in blocks
     )
 
-    # Convert OpenCV BGR → PIL RGBA
     pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).convert("RGBA")
     overlay   = Image.new("RGBA", pil_image.size, (0, 0, 0, 0))
     draw      = ImageDraw.Draw(overlay)
 
     if has_boxes:
-        logger.info("In-place overlay mode: rendering %d blocks with bounding boxes", len(blocks))
+        logger.info("In-place mode: rendering %d blocks", len(blocks))
         for block in blocks:
             if not block.translated_text.strip():
                 continue
@@ -395,7 +357,7 @@ def overlay_translations(
                 is_rtl=is_rtl,
             )
     else:
-        logger.info("Fallback panel mode: no bounding boxes, rendering bottom panel")
+        logger.info("Fallback panel mode: no bounding boxes")
         full_text = " ".join(
             b.translated_text.strip() for b in blocks if b.translated_text.strip()
         )
@@ -408,11 +370,10 @@ def overlay_translations(
 
 
 # ---------------------------------------------------------------------------
-# Convenience builder (unchanged signature — ocr_engine.py uses this)
+# Convenience builder
 # ---------------------------------------------------------------------------
 
 def build_overlay_blocks_from_regions(regions: list[dict]) -> list[OverlayBlock]:
-    """Convert raw region dicts from OCR result to typed OverlayBlock list."""
     blocks = []
     for r in regions:
         blocks.append(OverlayBlock(
