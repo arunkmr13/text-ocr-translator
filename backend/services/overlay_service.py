@@ -1,16 +1,13 @@
 # overlay_service.py
 # Renders translated text IN-PLACE over original text regions.
-# Uses Gemini bounding boxes to:
-#   1. Sample background colour of each region
-#   2. Paint a filled rectangle to erase original text
-#   3. Render translated English text at same position, auto-sized to fit
+# Supports a progress_callback(done, total) for real-time rendering progress.
 
 from __future__ import annotations
 import textwrap
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import cv2
 import numpy as np
@@ -91,26 +88,18 @@ class OverlayBlock:
 # ---------------------------------------------------------------------------
 
 def _sample_bg_color(image: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[int, int, int]:
-    """Sample dominant background colour using border pixels of the region."""
     ih, iw = image.shape[:2]
     x  = max(0, min(x, iw - 1))
     y  = max(0, min(y, ih - 1))
     x2 = max(0, min(x + w, iw))
     y2 = max(0, min(y + h, ih))
-
     if x2 <= x or y2 <= y:
         return (30, 30, 30)
-
     region = image[y:y2, x:x2]
     border_pixels = np.concatenate([
-        region[0, :],
-        region[-1, :],
-        region[:, 0],
-        region[:, -1],
+        region[0, :], region[-1, :], region[:, 0], region[:, -1],
     ], axis=0)
-
     median_bgr = np.median(border_pixels, axis=0).astype(int)
-    # BGR → RGB
     return (int(median_bgr[2]), int(median_bgr[1]), int(median_bgr[0]))
 
 
@@ -130,8 +119,7 @@ def _fit_font_size(
         font = _load_font(font_name, mid)
         try:
             bbox = draw.textbbox((0, 0), text, font=font)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         except Exception:
             tw, th = mid * len(text) * 0.6, mid * 1.2
         if tw <= max_width and th <= max_height:
@@ -162,80 +150,55 @@ def _render_block_inplace(
 ) -> None:
     x, y, w, h = block.x, block.y, block.width, block.height
     text = block.translated_text.strip()
-    if not text:
+    if not text or len(text) <= 1:
         return
 
     ih, iw = image_bgr.shape[:2]
-
-    # Skip blocks that are:
-    # - wider than 60% of image (full-width banners)
-    # - taller than 8% of image (large decorative boxes)
-    # - too small to render readable text
-    if w > iw * 0.60 or h > ih * 0.08 or h < 15:
-        logger.debug("Skipping oversized block (%dx%d): %s", w, h, text[:30])
+    if w > iw * 0.60 or h > ih * 0.06 or h < 15:
         return
 
-    # Clamp to image bounds
     x  = max(0, min(x, iw - 1))
     y  = max(0, min(y, ih - 1))
     w  = min(w, iw - x)
     h  = min(h, ih - y)
-
     if w < 5 or h < 5:
-        return
-
-    # Skip single character or number-only translations (likely OCR noise)
-    if len(text) <= 1:
         return
 
     if is_rtl:
         text = _apply_rtl(text)
 
-    # 1. Sample background colour
     bg_rgb = _sample_bg_color(image_bgr, x, y, w, h)
+    draw.rectangle([(x, y), (x + w, y + h)], fill=(*bg_rgb, 230))
 
-    # 2. Fill rectangle to erase original text
-    draw.rectangle(
-        [(x, y), (x + w, y + h)],
-        fill=(*bg_rgb, 230),
-    )
-
-    # 3. Fit and render translated text
     inner_w = max(w - padding * 2, 8)
     inner_h = max(h - padding * 2, 6)
-
     font, size = _fit_font_size(draw, text, inner_w, inner_h, font_name)
     text_color = _choose_text_color(bg_rgb)
 
     try:
         tb = draw.textbbox((0, 0), text, font=font)
-        tw = tb[2] - tb[0]
-        th = tb[3] - tb[1]
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
     except Exception:
         tw, th = size * len(text) * 0.6, size
 
     if tw <= inner_w:
-        # Single line — centre in box
         tx = x + padding + max(0, (inner_w - tw) // 2)
         ty = y + padding + max(0, (inner_h - th) // 2)
         draw.text((tx + 1, ty + 1), text, font=font, fill=(0, 0, 0, 80))
         draw.text((tx, ty), text, font=font, fill=text_color)
     else:
-        # Wrap text
         try:
             avg_cw = draw.textlength("A", font=font)
         except Exception:
             avg_cw = size * 0.6
         cpl = max(4, int(inner_w / max(avg_cw, 1)))
         lines = textwrap.wrap(text, width=cpl)
-
         line_h = size + 2
         if line_h * len(lines) > inner_h and len(lines) > 1:
             new_size = max(6, int(inner_h / len(lines)) - 2)
             font = _load_font(font_name, new_size)
             size = new_size
             line_h = size + 2
-
         ty = y + padding + max(0, (inner_h - line_h * len(lines)) // 2)
         for line in lines:
             if ty + line_h > y + h:
@@ -243,6 +206,51 @@ def _render_block_inplace(
             draw.text((x + padding + 1, ty + 1), line, font=font, fill=(0, 0, 0, 80))
             draw.text((x + padding, ty), line, font=font, fill=text_color)
             ty += line_h
+
+
+# ---------------------------------------------------------------------------
+# Region grouping
+# ---------------------------------------------------------------------------
+
+def _group_nearby_blocks(
+    blocks: list[OverlayBlock],
+    y_threshold: int = 10,
+    x_gap_threshold: int = 30,
+) -> list[OverlayBlock]:
+    if not blocks:
+        return blocks
+    sorted_blocks = sorted(blocks, key=lambda b: (b.y, b.x))
+    grouped = []
+    used = set()
+    for i, b in enumerate(sorted_blocks):
+        if i in used:
+            continue
+        group = [b]
+        used.add(i)
+        for j, b2 in enumerate(sorted_blocks):
+            if j in used:
+                continue
+            if abs(b2.y - b.y) <= y_threshold:
+                b_right = b.x + b.width
+                if abs(b2.x - b_right) <= x_gap_threshold or abs(b.x - (b2.x + b2.width)) <= x_gap_threshold:
+                    group.append(b2)
+                    used.add(j)
+        if len(group) == 1:
+            grouped.append(b)
+        else:
+            min_x = min(g.x for g in group)
+            min_y = min(g.y for g in group)
+            max_x = max(g.x + g.width for g in group)
+            max_y = max(g.y + g.height for g in group)
+            group_sorted = sorted(group, key=lambda g: g.x)
+            merged_text = " ".join(g.translated_text.strip() for g in group_sorted if g.translated_text.strip())
+            grouped.append(OverlayBlock(
+                x=min_x, y=min_y,
+                width=max_x - min_x,
+                height=max_y - min_y,
+                translated_text=merged_text,
+            ))
+    return grouped
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +320,7 @@ def _render_bottom_panel(
 
 
 # ---------------------------------------------------------------------------
-# Core public renderer
+# Core public renderer — with real progress callback
 # ---------------------------------------------------------------------------
 
 def overlay_translations(
@@ -320,20 +328,24 @@ def overlay_translations(
     blocks: list[OverlayBlock],
     language_result: LanguageResult | None = None,
     fill_alpha: float = 0.88,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> np.ndarray:
     """
     Render translated text over the image in-place.
-    Each block's bounding box is used to erase original text and
-    render the English translation at the exact same position.
-    Falls back to bottom panel if no bounding boxes available.
+
+    Args:
+        image:             OpenCV BGR numpy array
+        blocks:            List of OverlayBlock with positions + translated text
+        language_result:   Used for font selection and RTL flag
+        fill_alpha:        Opacity for fallback panel
+        progress_callback: Optional callable(done, total) called after each block renders
+                           Use this for real-time SSE progress reporting.
     """
     if not blocks:
         return image
 
     is_rtl    = (language_result.direction == "rtl") if language_result else False
     font_name = "NotoSans"
-
-    h, w = image.shape[:2]
 
     has_boxes = any(
         b.width > 0 and b.height > 0 and (b.x > 0 or b.y > 0)
@@ -345,9 +357,14 @@ def overlay_translations(
     draw      = ImageDraw.Draw(overlay)
 
     if has_boxes:
-        logger.info("In-place mode: rendering %d blocks", len(blocks))
-        for block in blocks:
+        blocks = _group_nearby_blocks(blocks)
+        total  = len(blocks)
+        logger.info("In-place mode: rendering %d blocks", total)
+
+        for i, block in enumerate(blocks):
             if not block.translated_text.strip():
+                if progress_callback:
+                    progress_callback(i + 1, total)
                 continue
             _render_block_inplace(
                 draw=draw,
@@ -356,6 +373,10 @@ def overlay_translations(
                 font_name=font_name,
                 is_rtl=is_rtl,
             )
+            # ← Real progress: called after EACH block is rendered
+            if progress_callback:
+                progress_callback(i + 1, total)
+
     else:
         logger.info("Fallback panel mode: no bounding boxes")
         full_text = " ".join(
@@ -363,7 +384,11 @@ def overlay_translations(
         )
         if is_rtl:
             full_text = _apply_rtl(full_text)
+        if progress_callback:
+            progress_callback(0, 1)
         _render_bottom_panel(pil_image, overlay, draw, full_text, language_result, font_name)
+        if progress_callback:
+            progress_callback(1, 1)
 
     composited = Image.alpha_composite(pil_image, overlay).convert("RGB")
     return cv2.cvtColor(np.array(composited), cv2.COLOR_RGB2BGR)

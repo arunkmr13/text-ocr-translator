@@ -1,7 +1,5 @@
 # ocr_engine.py
-# Orchestrator: replaces the 700-line Tesseract monolith.
-# Delegates entirely to language_service, ocr_service, overlay_service.
-# No Tesseract. No googletrans. No PSM tuning. No score multipliers.
+# Orchestrator: delegates to language_service, ocr_service, overlay_service.
 
 from __future__ import annotations
 
@@ -9,6 +7,8 @@ import logging
 import os
 import uuid
 import pathlib
+from typing import Callable
+
 import cv2
 import numpy as np
 
@@ -19,23 +19,15 @@ from backend.services.overlay_service import (
     build_overlay_blocks_from_regions,
     OverlayBlock,
 )
-logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
 
 BASE_DIR   = pathlib.Path(__file__).parent.parent
 OUTPUT_DIR = BASE_DIR / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# Image validation (retained from original — format checks are still valid)
-# ---------------------------------------------------------------------------
-
 def validate_image_bytes(data: bytes) -> bool:
-    """Quick magic-byte validation before passing to OpenCV."""
     if len(data) < 12:
         return False
     if data[:4] == b"%PDF":                            return True
@@ -45,10 +37,6 @@ def validate_image_bytes(data: bytes) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Image loading
-# ---------------------------------------------------------------------------
-
 def _load_image(image_path: str) -> np.ndarray | None:
     img = cv2.imread(image_path)
     if img is None:
@@ -56,28 +44,21 @@ def _load_image(image_path: str) -> np.ndarray | None:
     return img
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-
-def process_image(image_path: str) -> dict:
+def process_image(
+    image_path: str,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict:
     """
-    Main pipeline entry point. Replaces the original 700-line process_image.
+    Main pipeline entry point.
 
-    Pipeline:
-      1. Load image
-      2. Detect language (Unicode block analysis)
-      3. Extract + translate via Claude Vision API (single call)
-      4. Render translated overlay via PIL + Noto fonts
-      5. Return structured result dict
+    Args:
+        image_path:        Path to uploaded image file
+        progress_callback: Optional callable(done, total) called after each
+                           region is rendered. Used for SSE real-time progress.
 
     Returns dict with keys:
-      extracted_text    : original language text from image
-      translated_text   : English translation
-      translated_image  : path to overlay-rendered output image
-      detected_language : ISO 639-1 code e.g. "lo", "ar", "zh"
-      structured_data   : key metrics extracted by Claude (if any)
-      error             : non-None string if a stage failed
+        extracted_text, translated_text, translated_image,
+        detected_language, structured_data, region_count, error
     """
     result = {
         "extracted_text":    "",
@@ -85,24 +66,20 @@ def process_image(image_path: str) -> dict:
         "translated_image":  "",
         "detected_language": "unknown",
         "structured_data":   {},
+        "region_count":      0,
         "error":             None,
     }
 
-    # ── Stage 1: Load ────────────────────────────────────────────────
+    # Stage 1: Load
     img = _load_image(image_path)
     if img is None:
         result["error"] = "Could not read image. Check path and file format."
         return result
 
-    # ── Stage 2: Language detection ──────────────────────────────────
-    # We do a lightweight OCR-free Unicode probe first.
-    # Pass a small center crop of the image as PIL to Claude for initial
-    # character sampling — or simply let Claude Vision auto-detect.
-    # For now: pass None to let ocr_service prompt Claude to auto-detect,
-    # then confirm with Unicode analysis on the returned extracted_text.
+    # Stage 2: Language detection (deferred — done after OCR)
     language_result: LanguageResult | None = None
 
-    # ── Stage 3: OCR + Translation ───────────────────
+    # Stage 3: OCR + Translation
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         result["error"] = (
@@ -114,7 +91,7 @@ def process_image(image_path: str) -> dict:
     try:
         ocr_result: OCRResult = extract_and_translate(
             image=image_path,
-            language_result=language_result,   # None → Claude auto-detects
+            language_result=language_result,
             api_key=api_key,
         )
     except Exception as e:
@@ -122,9 +99,7 @@ def process_image(image_path: str) -> dict:
         result["error"] = f"OCR failed: {e}"
         return result
 
-    # ── Stage 3b: Confirm language from extracted text ───────────────
-    # Now that we have extracted text, run Unicode block analysis on it.
-    # This gives us the correct Noto font + RTL flag for overlay rendering.
+    # Stage 3b: Confirm language from extracted text
     if ocr_result.extracted_text:
         language_result = detect_language(ocr_result.extracted_text)
         logger.info(
@@ -149,26 +124,22 @@ def process_image(image_path: str) -> dict:
         result["error"] = "No readable text found in image."
         return result
 
-    # ── Stage 4: Overlay rendering ────────────────────────────────────
+    # Stage 4: Overlay rendering
     try:
-        # Build overlay blocks from OCR regions
-        # If Claude returned per-region bounding boxes, use them.
-        # Otherwise fall back to a single full-image banner block.
         if ocr_result.regions:
             region_dicts = [
                 {
-                    "x":           r.bounding_box.x      if r.bounding_box else 0,
-                    "y":           r.bounding_box.y      if r.bounding_box else 0,
-                    "width":       r.bounding_box.width  if r.bounding_box else img.shape[1],
-                    "height":      r.bounding_box.height if r.bounding_box else 30,
-                    "translated":  r.translated_text,
+                    "x":          r.bounding_box.x      if r.bounding_box else 0,
+                    "y":          r.bounding_box.y      if r.bounding_box else 0,
+                    "width":      r.bounding_box.width  if r.bounding_box else img.shape[1],
+                    "height":     r.bounding_box.height if r.bounding_box else 30,
+                    "translated": r.translated_text,
                 }
                 for r in ocr_result.regions
                 if r.translated_text.strip()
             ]
             blocks = build_overlay_blocks_from_regions(region_dicts)
         else:
-            # No bounding boxes — single banner at bottom of image
             h, w = img.shape[:2]
             blocks = [
                 OverlayBlock(
@@ -180,14 +151,16 @@ def process_image(image_path: str) -> dict:
                 )
             ]
 
+        result["region_count"] = len(blocks)
+
         rendered = overlay_translations(
             image=img,
             blocks=blocks,
             language_result=language_result,
             fill_alpha=0.88,
+            progress_callback=progress_callback,  # ← real-time progress
         )
 
-        # Save output
         out_path = OUTPUT_DIR / f"{uuid.uuid4()}.jpg"
         cv2.imwrite(str(out_path), rendered)
         result["translated_image"] = str(out_path)
@@ -195,6 +168,5 @@ def process_image(image_path: str) -> dict:
     except Exception as e:
         logger.exception("Overlay rendering failed")
         result["error"] = f"Render failed: {e}"
-        # Still return text results even if render fails
 
     return result

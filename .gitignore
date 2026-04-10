@@ -1,26 +1,29 @@
 # Python
+venv/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
+.eggs/
 dist/
 build/
 
-# Virtual environment
-venv/
-env/
+# Environment — NEVER commit API keys
 .env
+*.env
+.env.*
 
-# App runtime dirs
+# Runtime output dirs — no need to track processed images
 uploads/
 outputs/
 
-# macOS
+# OS
 .DS_Store
+Thumbs.db
 
 # IDE
-.vscode/
+.vscode/settings.json
 .idea/
-.env
-.env
+*.swp
+
+# Logs
+*.log

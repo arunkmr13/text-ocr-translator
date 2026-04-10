@@ -215,6 +215,7 @@
   .step-text { flex:1; }
   .step-title { font-size:0.78rem; color:var(--text); margin-bottom:2px; }
   .step-desc  { font-size:0.68rem; color:var(--text-muted); }
+  @keyframes spin4 { from { transform-origin:7px 7px; transform:rotate(0deg); } to { transform-origin:7px 7px; transform:rotate(360deg); } }
 
   /* Lang badge */
   #langBadge {
@@ -373,7 +374,16 @@
           <div class="step-icon" id="step4icon">4</div>
           <div class="step-text">
             <div class="step-title">Render Output</div>
-            <div class="step-desc">Overlay translation on image</div>
+            <div class="step-desc" id="step4desc">Overlay translation on image</div>
+            <div id="step4progress" style="display:none;margin-top:6px">
+              <div style="height:3px;background:var(--border);border-radius:2px;overflow:hidden">
+                <div id="step4bar" style="height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width 0.3s ease"></div>
+              </div>
+              <div style="display:flex;justify-content:space-between;margin-top:4px">
+                <span id="step4phase" style="font-size:0.65rem;color:var(--accent)">Rendering...</span>
+                <span id="step4counter" style="font-size:0.65rem;color:var(--text-muted)"></span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -442,7 +452,7 @@
   </section>
 </main>
 
-<script src="/static/script.js"></script>
+<script src="/static/script.js?v=2"></script>
 <script>
   // ── Theme toggle ──────────────────────────────────────────────
   function toggleTheme() {
