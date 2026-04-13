@@ -10,8 +10,8 @@ services:
       - uploads_data:/app/uploads
       - outputs_data:/app/outputs
     environment:
-      - TESSERACT_CMD=/usr/bin/tesseract
-      - TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
+  - GEMINI_API_KEY=${GEMINI_API_KEY}
+  - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
