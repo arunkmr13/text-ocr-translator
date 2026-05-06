@@ -1,5 +1,6 @@
 const MAX_SIZE = 5 * 1024 * 1024;
 let currentData = null;
+let _renderStartTime = null;  // tracks when translation started for toast timing
 
 // ── File selection ──────────────────────────────────────────────
 const input = document.getElementById("imageInput");
@@ -48,7 +49,6 @@ function resetSteps() {
         el.classList.remove("active","done");
         icon.textContent = String(n);
     });
-    // FIX #2: Always clear the interval on reset — prevents memory leak
     if (window._renderProgressInterval) {
         clearInterval(window._renderProgressInterval);
         window._renderProgressInterval = null;
@@ -63,9 +63,6 @@ function resetSteps() {
     if (prog)    prog.style.display = "none";
 }
 
-// FIX #2: animateSteps() no longer polls window._renderDone.
-// It simply animates steps 1-3, activates step 4, then RETURNS.
-// Step 4 completion is driven by runTranslation() after data arrives.
 async function animateSteps() {
     for (let i = 0; i < 3; i++) {
         setStep(i + 1, "active");
@@ -73,7 +70,6 @@ async function animateSteps() {
         setStep(i + 1, "done");
     }
     setStep(4, "active");
-    // Show step 4 progress bar immediately
     const prog = document.getElementById("step4progress");
     if (prog) prog.style.display = "block";
 }
@@ -86,7 +82,6 @@ function startRenderProgress() {
     const progress = document.getElementById("step4progress");
     if (!progress) return;
 
-    const total = 96;
     const phases = [
         { pct: 0,  label: "Sampling backgrounds..." },
         { pct: 25, label: "Rendering regions..." },
@@ -99,15 +94,13 @@ function startRenderProgress() {
 
     if (icon) icon.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" style="animation:spin4 1s linear infinite;display:block"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="20" stroke-dashoffset="8" stroke-linecap="round"/></svg>`;
 
-    // FIX #2: Store interval ref so resetSteps() can always clear it
     window._renderProgressInterval = setInterval(() => {
         pct += Math.random() * 6 + 2;
         if (pct >= 95) pct = 95;
-        const done = Math.round((pct / 100) * total);
         bar.style.width = pct.toFixed(0) + "%";
         const currentPhase = [...phases].reverse().find(p => pct >= p.pct);
         if (currentPhase) phase.textContent = currentPhase.label;
-        counter.textContent = done + " / " + total + " done";
+        counter.textContent = pct.toFixed(0) + "%";
     }, 200);
 }
 
@@ -121,10 +114,36 @@ function completeRenderProgress() {
     const counter = document.getElementById("step4counter");
     if (bar)     { bar.style.width = "100%"; bar.style.background = "var(--accent)"; }
     if (phase)   phase.textContent = "Complete";
-    if (counter) counter.textContent = "100%";
+    if (counter) counter.textContent = "Complete";
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── Render toast ────────────────────────────────────────────────
+function showRenderToast(seconds) {
+    const toast  = document.getElementById("renderToast");
+    const detail = document.getElementById("toastDetail");
+    if (!toast) return;
+
+    detail.textContent = `Overlay rendered in ${seconds}s`;
+
+    // Reset bar animation by cloning — removes existing animation state
+    const oldBar = document.getElementById("toastBar");
+    if (oldBar) {
+        const newBar = oldBar.cloneNode(true);
+        oldBar.parentNode.replaceChild(newBar, oldBar);
+    }
+
+    clearTimeout(window._toastTimer);
+    toast.classList.remove("hide");
+    toast.classList.add("show");
+
+    // Auto-dismiss after 4s
+    window._toastTimer = setTimeout(() => {
+        toast.classList.add("hide");
+        setTimeout(() => toast.classList.remove("show", "hide"), 600);
+    }, 4000);
+}
 
 // ── DOM helpers ─────────────────────────────────────────────────
 function setImageSlot(id, src, alt) {
@@ -196,7 +215,7 @@ function setTextSlot(wrapperId, text) {
     }
 }
 
-// ── SSE fetch helper (unused in /upload path, kept for /upload-stream) ──
+// ── SSE fetch helper ────────────────────────────────────────────
 async function fetchSSE(url, formData, { onProgress, onResult, onError }) {
     const response = await fetch(url, { method: "POST", body: formData });
     if (!response.ok) {
@@ -239,7 +258,7 @@ function updateRenderProgress(done, total) {
     if (progress) progress.style.display = "block";
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
     bar.style.width = pct + "%";
-    counter.textContent = done + " / " + total + " done";
+    counter.textContent = pct + "%";
     const phases = [
         { pct: 0,  label: "Sampling backgrounds..." },
         { pct: 25, label: "Rendering regions..." },
@@ -251,9 +270,6 @@ function updateRenderProgress(done, total) {
 }
 
 // ── Main upload ─────────────────────────────────────────────────
-// FIX #1: Use Promise.all() to run animation and fetch concurrently.
-// The fetch .json() body is consumed IMMEDIATELY inside the Promise chain,
-// never deferred past an await boundary — eliminating the race condition.
 async function runTranslation() {
     const fileInput = document.getElementById("imageInput");
     if (!fileInput.files.length) return;
@@ -261,32 +277,26 @@ async function runTranslation() {
     const btn = document.getElementById("translateBtn");
     btn.disabled    = true;
     btn.textContent = "Processing…";
+    _renderStartTime = performance.now();   // start timer for toast
     hideError(); hideWarning(); resetSteps(); clearOutputs();
 
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
 
-    // Start fake progress bar for step 4 alongside animation
-    // (will be overridden by real data once fetch resolves)
-    setTimeout(() => startRenderProgress(), 2700); // ~when steps 1-3 finish
+    setTimeout(() => startRenderProgress(), 2700);
 
-    // FIX #1: Both promises run concurrently.
-    // fetch chain reads .json() eagerly — never deferred past an await.
     const [, result] = await Promise.all([
         animateSteps(),
         fetch("/upload", { method: "POST", body: formData })
             .then(async (response) => {
-                // ← Body consumed immediately here, inside the Promise chain
                 const data = await response.json().catch(() => ({
                     error: `Server error ${response.status}`,
                 }));
-                // Attach HTTP meta so we can inspect it after Promise.all
                 data.__ok     = response.ok;
                 data.__status = response.status;
                 return data;
             })
-            .catch((networkErr) => ({
-                // Network-level failure (server down, CORS, etc.)
+            .catch(() => ({
                 error: "Could not reach the server. Is the backend running?  uvicorn backend.main:app --reload",
                 __ok:     false,
                 __status: 0,
@@ -312,7 +322,10 @@ async function runTranslation() {
     await sleep(400);
     setStep(4, "done");
 
-    // Strip internal meta-fields before storing in module-level currentData
+    // Show toast with elapsed time
+    const renderSeconds = ((performance.now() - _renderStartTime) / 1000).toFixed(1);
+    showRenderToast(renderSeconds);
+
     const { __ok, __status, ...cleanResult } = result;
     currentData = cleanResult;
 
@@ -324,7 +337,6 @@ async function runTranslation() {
             result.detected_language.toUpperCase();
     }
 
-    // Images
     if (result.original_image) {
         setImageSlot("originalWrap", `/${result.original_image}`, "Original");
         document.getElementById("dlOriginal").style.display = "flex";
@@ -334,7 +346,6 @@ async function runTranslation() {
         document.getElementById("dlTranslated").style.display = "flex";
     }
 
-    // Text
     setTextSlot("extractedWrap",      result.extracted_text  || "");
     setTextSlot("translatedTextWrap", result.translated_text || "");
 

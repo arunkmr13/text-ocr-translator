@@ -48,14 +48,6 @@ def process_image(
     image_path: str,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
-    """
-    Main pipeline:
-      1. Load image
-      2. OCR + translation (two-pass Gemini)
-      3. Language confirmation
-      4. Build overlay blocks
-      5. Render overlay
-    """
     result = {
         "extracted_text":    "",
         "translated_text":   "",
@@ -69,13 +61,13 @@ def process_image(
     # ── Stage 1: Load ────────────────────────────────────────────────────────
     img = _load_image(image_path)
     if img is None:
-        result["error"] = "Could not read image. Check path and file format."
+        result["error"] = "Could not read image."
         return result
 
-    # ── Stage 2: OCR + Translation (two-pass) ────────────────────────────────
+    # ── Stage 2: OCR + Translation ───────────────────────────────────────────
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        result["error"] = "GEMINI_API_KEY not set. Add it to your .env file."
+        result["error"] = "GEMINI_API_KEY not set."
         return result
 
     language_result: LanguageResult | None = None
@@ -87,7 +79,7 @@ def process_image(
             api_key=api_key,
         )
     except Exception as e:
-        logger.exception("OCR/translation stage failed")
+        logger.exception("OCR/translation failed")
         result["error"] = f"OCR failed: {e}"
         return result
 
@@ -129,6 +121,7 @@ def process_image(
                     width=r.bounding_box.width,
                     height=r.bounding_box.height,
                     translated_text=r.translated_text,
+                    region_type=getattr(r, 'region_type', 'other'),
                 )
                 for r in ocr_result.regions
                 if r.translated_text.strip() and r.bounding_box

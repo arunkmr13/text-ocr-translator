@@ -315,13 +315,82 @@
     .image-grid, .text-grid { grid-template-columns:1fr; }
     header { padding:16px 20px; }
   }
+
+/* ── Render toast notification ── */
+#renderToast {
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text);
+  box-shadow: 0 0 24px rgba(200,240,96,0.15), 0 4px 20px rgba(0,0,0,0.4);
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+#renderToast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+#renderToast.hide {
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+.toast-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  border: 1.5px solid var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 0.7rem;
+}
+.toast-body { display: flex; flex-direction: column; gap: 2px; }
+.toast-title {
+  color: var(--accent);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.toast-detail { color: var(--text-muted); font-size: 0.7rem; }
+.toast-bar {
+  position: absolute;
+  bottom: 0; left: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 0 0 var(--radius) var(--radius);
+  width: 100%;
+  transform-origin: left;
+  animation: toastProgress 4s linear forwards;
+}
+@keyframes toastProgress {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+
 </style>
 </head>
+
 <body>
 
 <header>
-  <h1><span class="dot"></span>Translate</h1>
-  <span class="subtitle">OCR · Auto-detect · Translate to English</span>
+  <h1><span class="dot"></span>OCR</h1>
+  <span class="subtitle">· Auto-detect · Translate to English ·</span>
   <button id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode"></button>
   <span class="theme-icon" id="themeIcon">☀︎</span>
 </header>
@@ -470,5 +539,15 @@
     document.getElementById('themeIcon').textContent = saved === 'light' ? '☽' : '☀︎';
   })();
 </script>
+
+<div id="renderToast">
+  <div class="toast-icon">✓</div>
+  <div class="toast-body">
+    <div class="toast-title" id="toastTitle">Render complete</div>
+    <div class="toast-detail" id="toastDetail">—</div>
+  </div>
+  <div class="toast-bar" id="toastBar"></div>
+</div>
+
 </body>
 </html>

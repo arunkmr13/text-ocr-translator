@@ -1,13 +1,16 @@
 # overlay_service.py
 # Semi-transparent box overlay — readability-first.
 # Font size is HEIGHT-DRIVEN: derived from bbox height to match the visual
-# scale of the original text, not binary-searched down to minimum fit.
+# scale of the original text.
+#
+# Design principle: NEVER mutate bboxes. The bbox defines the coverage area.
+# Only control how text renders INSIDE the given bbox.
 
 from __future__ import annotations
 
 import logging
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -72,12 +75,12 @@ class OverlayBlock:
     width: int
     height: int
     translated_text: str
+    region_type: str = "other"
 
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 
 def _sample_bg(img: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[int,int,int]:
-    """Median colour of the centre 40% of the region (avoids grid-line colours)."""
     ih, iw = img.shape[:2]
     x  = max(0, min(x,  iw-1));  y  = max(0, min(y,  ih-1))
     x2 = min(x+w, iw);           y2 = min(y+h, ih)
@@ -88,7 +91,7 @@ def _sample_bg(img: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[int,int
     if cx2 <= cx1 or cy2 <= cy1:
         cx1, cy1, cx2, cy2 = x, y, x2, y2
     med = np.median(img[cy1:cy2, cx1:cx2].reshape(-1,3), axis=0).astype(int)
-    return (int(med[2]), int(med[1]), int(med[0]))   # BGR→RGB
+    return (int(med[2]), int(med[1]), int(med[0]))
 
 
 def _text_color(bg: tuple[int,int,int]) -> tuple[int,int,int,int]:
@@ -105,18 +108,16 @@ def _fill_color(bg: tuple[int,int,int], f: float = 0.82) -> tuple[int,int,int]:
     return (min(255,int(r*inv)), min(255,int(g*inv)), min(255,int(b*inv)))
 
 
-# ── Font sizing — HEIGHT-DRIVEN ───────────────────────────────────────────────
+# ── Font sizing ───────────────────────────────────────────────────────────────
 
 def _size_from_height(box_h: int, padding: int = 3) -> int:
     """
-    Derive font point size from bbox height.
-    font_size = (inner_height) × 0.78
-    This matches the visual scale of the original text because the bbox height
-    is determined by the original glyph height, so English text at this size
-    occupies the same vertical space.
+    Font size derived from bbox height with multiplier 1.25.
+    Calibrated so English cap-height matches original Lao glyph visual size.
+    _wrap_and_reduce will scale down if text overflows horizontally.
     """
     inner = max(box_h - padding * 2, 8)
-    return max(8, int(inner * 0.78))
+    return max(8, int(inner * 1.25))
 
 
 def _wrap_and_reduce(
@@ -126,11 +127,16 @@ def _wrap_and_reduce(
     font_size: int,
     inner_w: int,
     inner_h: int,
+    single_line_only: bool = False,
 ) -> tuple[ImageFont.FreeTypeFont, list[str], int]:
     """
-    Start at font_size (height-derived). Wrap text to fit inner_w.
-    If wrapped block exceeds inner_h, step down 1pt at a time until it fits.
-    Returns (font, lines, final_size).
+    Start at font_size. Wrap text to fit inner_w.
+    Reduce font size until wrapped block fits in inner_h.
+
+    single_line_only: if True, never wrap — fit on one line only,
+    truncating with ellipsis if needed. Used for stat labels and
+    table headers where wrapping to tiny multi-line is worse than
+    single-line truncation.
     """
     def line_height(fnt):
         try:
@@ -139,25 +145,52 @@ def _wrap_and_reduce(
         except Exception:
             return fnt.size + 2
 
-    def wrap(fnt, txt):
+    def text_width(fnt, txt):
         try:
-            if draw.textlength(txt, font=fnt) <= inner_w:
-                return [txt]
+            return draw.textlength(txt, font=fnt)
+        except Exception:
+            return fnt.size * len(txt) * 0.55
+
+    def wrap_lines(fnt, txt):
+        if text_width(fnt, txt) <= inner_w:
+            return [txt]
+        try:
             avg = max(draw.textlength("A", font=fnt), 1)
         except Exception:
             avg = fnt.size * 0.55
         cpl = max(3, int(inner_w / avg))
         return textwrap.wrap(txt, width=cpl) or [txt]
 
-    size  = font_size
-    fnt   = _load_font(font_name, size)
-    lines = wrap(fnt, text)
-    lh    = line_height(fnt)
+    def fit_single_line(fnt, txt):
+        """Fit on one line, truncate with ellipsis if needed."""
+        if text_width(fnt, txt) <= inner_w:
+            return [txt]
+        try:
+            avg = max(draw.textlength("A", font=fnt), 1)
+        except Exception:
+            avg = fnt.size * 0.55
+        chars = max(2, int(inner_w / avg) - 1)
+        return [txt[:chars] + "…"]
 
+    size = font_size
+    fnt  = _load_font(font_name, size)
+
+    if single_line_only:
+        # Reduce font until single line fits vertically, then truncate width
+        lh = line_height(fnt)
+        while lh > inner_h and size > 8:
+            size = max(8, size - 1)
+            fnt  = _load_font(font_name, size)
+            lh   = line_height(fnt)
+        return fnt, fit_single_line(fnt, text), size
+
+    # Normal: wrap then reduce until fits
+    lines = wrap_lines(fnt, text)
+    lh    = line_height(fnt)
     while lh * len(lines) > inner_h and size > 8:
         size  = max(8, size - 1)
         fnt   = _load_font(font_name, size)
-        lines = wrap(fnt, text)
+        lines = wrap_lines(fnt, text)
         lh    = line_height(fnt)
 
     return fnt, lines, size
@@ -175,7 +208,9 @@ def _render_block(
     padding: int = 3,
 ) -> None:
     x, y, w, h = block.x, block.y, block.width, block.height
-    text = block.translated_text.strip()
+    text  = block.translated_text.strip()
+    rtype = block.region_type
+
     if not text:
         return
 
@@ -192,16 +227,20 @@ def _render_block(
     fill = _fill_color(bg)
     tc   = _text_color(fill)
 
-    # Filled semi-transparent box — fully covers original text
     draw.rectangle([(x,y),(x+w,y+h)], fill=(*fill, box_alpha))
 
-    # Font size from height — matches original text scale
     font_size = _size_from_height(h, padding)
     inner_w   = max(w - padding*2, 4)
     inner_h   = max(h - padding*2, 4)
 
+    # stat_label and table_header: single line with truncation
+    # These have wide English text in narrow boxes — wrapping makes them
+    # unreadably tiny. Single-line truncation is always more readable.
+    single_line = rtype in ("stat_label", "table_header")
+
     font, lines, size = _wrap_and_reduce(
-        draw, text, font_name, font_size, inner_w, inner_h
+        draw, text, font_name, font_size, inner_w, inner_h,
+        single_line_only=single_line,
     )
     if not lines:
         return
@@ -221,8 +260,8 @@ def _render_block(
         try:    lw = draw.textlength(line, font=font)
         except: lw = size * len(line) * 0.55
         tx = x + padding + max(0, int((w - padding*2 - lw) / 2))
-        draw.text((tx+1, ty+1), line, font=font, fill=(0,0,0,110))   # shadow
-        draw.text((tx,   ty  ), line, font=font, fill=tc)             # text
+        draw.text((tx+1, ty+1), line, font=font, fill=(0,0,0,110))
+        draw.text((tx,   ty  ), line, font=font, fill=tc)
         ty += line_h
 
 
@@ -233,8 +272,6 @@ def _group_nearby_blocks(
     y_threshold: int = 6,
     x_gap_threshold: int = 15,
 ) -> list[OverlayBlock]:
-    """Merge only directly adjacent same-row fragments — tight thresholds
-    prevent separate table columns being merged into one block."""
     if not blocks:
         return blocks
     sorted_b  = sorted(blocks, key=lambda b: (b.y, b.x))
@@ -253,8 +290,8 @@ def _group_nearby_blocks(
         if len(group) == 1:
             grouped.append(b)
         else:
-            min_x  = min(g.x            for g in group)
-            min_y  = min(g.y            for g in group)
+            min_x  = min(g.x for g in group)
+            min_y  = min(g.y for g in group)
             max_x  = max(g.x + g.width  for g in group)
             max_y  = max(g.y + g.height for g in group)
             merged = " ".join(
@@ -262,10 +299,12 @@ def _group_nearby_blocks(
                 for g in sorted(group, key=lambda g: g.x)
                 if g.translated_text.strip()
             )
+            # Keep the region_type of the first block in the group
             grouped.append(OverlayBlock(
                 x=min_x, y=min_y,
                 width=max_x-min_x, height=max_y-min_y,
                 translated_text=merged,
+                region_type=b.region_type,
             ))
     return grouped
 
@@ -328,7 +367,7 @@ def overlay_translations(
     if has_boxes:
         blocks = _group_nearby_blocks(blocks)
         total  = len(blocks)
-        logger.info("Overlay: %d blocks (height-driven font mode)", total)
+        logger.info("Overlay: %d blocks", total)
         for i, block in enumerate(blocks):
             if block.translated_text.strip():
                 _render_block(draw, image, block, font_name, is_rtl,

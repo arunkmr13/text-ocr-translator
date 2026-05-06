@@ -1,8 +1,11 @@
 # ocr_service.py
 # Two-pass Gemini strategy:
-#   Pass 1 — full OCR + translation + metadata + first-pass regions
+#   Pass 1 — full OCR + translation + non-table regions (title, date, stats, headers, footers)
 #   Pass 2 — dedicated table-row bbox extraction (all rows, compact JSON)
-# This prevents Gemini truncating mid-table when response hits length limits.
+#
+# Design principle: NEVER mutate Gemini bboxes.
+# The bbox defines the actual text coverage area — expanding or shifting it
+# causes visual overlap with adjacent cells.
 
 from __future__ import annotations
 import json
@@ -47,6 +50,7 @@ class TextRegion:
     original_text: str
     translated_text: str
     bounding_box: BoundingBox | None = None
+    region_type: str = "other"
 
 
 @dataclass
@@ -96,7 +100,7 @@ def _load_image_cv2(image: np.ndarray | str | Path) -> tuple[np.ndarray, int, in
 
 
 # ---------------------------------------------------------------------------
-# Gemini API call
+# Gemini API
 # ---------------------------------------------------------------------------
 
 def _parse_retry_delay(err: str, default: float = 2.0) -> float:
@@ -146,7 +150,7 @@ def _parse_json(raw: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Pass 1 prompt — full OCR + translation + non-table regions
+# Pass 1 prompt
 # ---------------------------------------------------------------------------
 
 def _prompt_pass1(language_result: LanguageResult | None) -> str:
@@ -164,14 +168,13 @@ TASK:
 1. Extract ALL text and translate to English.
 2. Return bounding boxes for NON-TABLE elements only:
    title, subtitle, date, stat labels, stat values, table headers, footers.
-3. For table data rows — do NOT include them in regions here.
-   They will be fetched in a separate call.
+3. Do NOT include table data rows in regions — they are fetched separately.
 4. Format extracted_text and translated_text as markdown with pipe tables.
 
 BBOX RULES:
 - Normalised: x=left/W, y=top/H, w=width/W, h=height/H (all 0.0-1.0)
 - ONE region per element — never merge multiple elements
-- TIGHT fit around text only
+- TIGHT fit around the text pixels only
 - Stat boxes: TWO regions — label bbox + value bbox separately
 - Table headers: one region PER header cell
 
@@ -202,25 +205,24 @@ Return ONLY raw JSON:
 
 
 # ---------------------------------------------------------------------------
-# Pass 2 prompt — table rows only, compact format
+# Pass 2 prompt
 # ---------------------------------------------------------------------------
 
 _PROMPT_PASS2 = """
 This image contains a data table. Return bounding boxes for EVERY data row cell.
 
-CRITICAL: Return ALL rows completely — do not stop early or truncate.
+CRITICAL: Return ALL rows — do not stop early or truncate.
 
-For each cell in each data row return:
+For each cell in each data row:
 - "o": original text
-- "t": English translation  
-- "b": [x, y, w, h] normalised bbox (0.0-1.0), TIGHT around text
+- "t": English translation
+- "b": [x, y, w, h] normalised bbox (0.0-1.0), TIGHT around text only
 
-Return ONLY this JSON (no markdown, no explanation):
+Return ONLY this JSON:
 {
   "rows": [
     {
       "cells": [
-        {"o": "<orig>", "t": "<English>", "b": [x, y, w, h]},
         {"o": "<orig>", "t": "<English>", "b": [x, y, w, h]}
       ]
     }
@@ -262,18 +264,14 @@ def _format_markdown(data: dict[str, Any]) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# bbox builder — shared by both passes
+# BBox builders
 # ---------------------------------------------------------------------------
 
+# Types where wide bbox is expected and should not be rejected
 _WIDE_OK = {"title", "subtitle", "footer", "date"}
 
 
-def _make_bbox(
-    raw: dict,
-    img_w: int,
-    img_h: int,
-    region_type: str = "other",
-) -> BoundingBox | None:
+def _make_bbox(raw: dict, img_w: int, img_h: int, rtype: str = "other") -> BoundingBox | None:
     if not raw:
         return None
     try:
@@ -281,27 +279,18 @@ def _make_bbox(
         ny = max(0.0, min(float(raw.get("y", 0)), 1.0))
         nw = max(0.005, min(float(raw.get("w", 0)), 1.0 - nx))
         nh = max(0.005, min(float(raw.get("h", 0)), 1.0 - ny))
-
-        if nw > 0.45 and region_type not in _WIDE_OK:
-            logger.debug("Rejected wide bbox nw=%.3f type=%s", nw, region_type)
+        if nw > 0.45 and rtype not in _WIDE_OK:
+            logger.debug("Rejected wide bbox nw=%.3f type=%s", nw, rtype)
             return None
-
         return BoundingBox(
-            x=int(nx * img_w),
-            y=int(ny * img_h),
-            width=int(nw * img_w),
-            height=int(nh * img_h),
+            x=int(nx * img_w), y=int(ny * img_h),
+            width=int(nw * img_w), height=int(nh * img_h),
         )
     except (TypeError, ValueError):
         return None
 
 
-def _make_bbox_list(
-    coords: list,
-    img_w: int,
-    img_h: int,
-) -> BoundingBox | None:
-    """Build BoundingBox from [x, y, w, h] list (Pass 2 format)."""
+def _make_bbox_list(coords: list, img_w: int, img_h: int) -> BoundingBox | None:
     if not coords or len(coords) < 4:
         return None
     try:
@@ -310,13 +299,31 @@ def _make_bbox_list(
         nw = max(0.005, min(float(coords[2]), 1.0 - nx))
         nh = max(0.005, min(float(coords[3]), 1.0 - ny))
         return BoundingBox(
-            x=int(nx * img_w),
-            y=int(ny * img_h),
-            width=int(nw * img_w),
-            height=int(nh * img_h),
+            x=int(nx * img_w), y=int(ny * img_h),
+            width=int(nw * img_w), height=int(nh * img_h),
         )
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# IoU deduplication helper
+# ---------------------------------------------------------------------------
+
+def _iou(a: BoundingBox, b: BoundingBox) -> float:
+    ix = max(0, min(a.x+a.width,  b.x+b.width)  - max(a.x, b.x))
+    iy = max(0, min(a.y+a.height, b.y+b.height) - max(a.y, b.y))
+    inter = ix * iy
+    union = a.width*a.height + b.width*b.height - inter
+    return inter / union if union > 0 else 0.0
+
+
+# Types exempt from IoU deduplication — they are Pass 1 only and should
+# never be removed by a Pass 2 cell match
+_DEDUP_EXEMPT = {
+    "stat_label", "stat_value",
+    "table_header", "title", "subtitle", "date", "footer",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -338,14 +345,12 @@ def extract_and_translate(
 
     _, img_w, img_h = _load_image_cv2(image)
 
-    # ── Pass 1: Full OCR + translation + non-table regions ───────────────────
-    prompt1  = _prompt_pass1(language_result)
-    raw1     = _call_gemini(image_bytes, mime_type, prompt1, api_key)
-    data1    = _parse_json(raw1)
+    # ── Pass 1 ───────────────────────────────────────────────────────────────
+    raw1  = _call_gemini(image_bytes, mime_type, _prompt_pass1(language_result), api_key)
+    data1 = _parse_json(raw1)
 
     extracted_text, translated_text = _format_markdown(data1)
 
-    # Build regions from Pass 1 (non-table elements)
     regions: list[TextRegion] = []
     for r in (data1.get("regions") or []):
         rtype = r.get("type", "other")
@@ -354,18 +359,17 @@ def extract_and_translate(
             original_text=r.get("original", ""),
             translated_text=r.get("translated", ""),
             bounding_box=bbox,
+            region_type=rtype,
         ))
 
     logger.info("Pass 1: %d regions (%d with bbox)",
                 len(regions), sum(1 for r in regions if r.bounding_box))
 
-    # ── Pass 2: Table row bboxes ─────────────────────────────────────────────
-    # Only run if structured_data contains tables with rows
+    # ── Pass 2 ───────────────────────────────────────────────────────────────
     sd     = data1.get("structured_data") or {}
     tables = sd.get("tables") or []
-    has_table_data = any(tbl.get("rows") for tbl in tables)
 
-    if has_table_data:
+    if any(tbl.get("rows") for tbl in tables):
         try:
             raw2  = _call_gemini(image_bytes, mime_type, _PROMPT_PASS2, api_key)
             data2 = _parse_json(raw2)
@@ -373,22 +377,35 @@ def extract_and_translate(
             row_regions: list[TextRegion] = []
             for row in (data2.get("rows") or []):
                 for cell in (row.get("cells") or []):
-                    bbox = _make_bbox_list(cell.get("b"), img_w, img_h)
                     row_regions.append(TextRegion(
                         original_text=cell.get("o", ""),
                         translated_text=cell.get("t", ""),
-                        bounding_box=bbox,
+                        bounding_box=_make_bbox_list(cell.get("b"), img_w, img_h),
+                        region_type="table_cell",
                     ))
 
-            logger.info("Pass 2: %d row cells (%d with bbox)",
+            logger.info("Pass 2: %d cells (%d with bbox)",
                         len(row_regions), sum(1 for r in row_regions if r.bounding_box))
 
+            # Deduplicate: remove Pass 1 non-exempt regions that overlap Pass 2 cells
+            p2_bboxes = [r.bounding_box for r in row_regions if r.bounding_box]
+            deduped   = [
+                r for r in regions
+                if r.region_type in _DEDUP_EXEMPT
+                or not r.bounding_box
+                or not any(_iou(r.bounding_box, b) > 0.30 for b in p2_bboxes)
+            ]
+            removed = len(regions) - len(deduped)
+            if removed:
+                logger.info("Dedup: removed %d Pass 1 regions overlapping Pass 2", removed)
+
+            regions = deduped
             regions.extend(row_regions)
 
         except Exception as e:
-            logger.warning("Pass 2 (table rows) failed — overlay will skip table cells: %s", e)
+            logger.warning("Pass 2 failed — no table cell overlay: %s", e)
 
-    logger.info("Total regions: %d (%d with bbox)",
+    logger.info("Total: %d regions (%d with bbox)",
                 len(regions), sum(1 for r in regions if r.bounding_box))
 
     return OCRResult(
