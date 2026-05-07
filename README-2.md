@@ -195,7 +195,7 @@ uvicorn backend.main:app --reload
 
 ## Key Engineering Decisions
 
-Why Gemini Vision instead of Tesseract + Google Translate?**
+Why Gemini Vision instead of Tesseract + Google Translate?
 Tesseract requires language packs installed per language, struggles with non-Latin scripts, and has no table understanding. Gemini Vision reads any script out of the box, understands document structure, and returns both translation and spatial coordinates in a single API call.
 
 Why vanilla JS instead of React?
