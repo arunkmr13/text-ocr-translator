@@ -117,7 +117,7 @@ def _size_from_height(box_h: int, padding: int = 3) -> int:
     _wrap_and_reduce will scale down if text overflows horizontally.
     """
     inner = max(box_h - padding * 2, 8)
-    return max(8, int(inner * 1.25))
+    return max(8, int(inner * 1.75))
 
 
 def _wrap_and_reduce(
@@ -233,10 +233,38 @@ def _render_block(
     inner_w   = max(w - padding*2, 4)
     inner_h   = max(h - padding*2, 4)
 
-    # stat_label and table_header: single line with truncation
-    # These have wide English text in narrow boxes — wrapping makes them
-    # unreadably tiny. Single-line truncation is always more readable.
-    single_line = rtype in ("stat_label", "table_header")
+    # Rendering mode strategy — two discriminators combined:
+    #
+    # PARAGRAPH mode (wrap at readable size):
+    #   Condition: word_count > 6 AND aspect_ratio < 3.0
+    #   OR rtype in WRAP_ALWAYS (title, subtitle, footer)
+    #   Used for: body text blocks in documents (Italian letter paragraphs etc.)
+    #   Gemini returns one bbox covering multiple text lines → height-driven
+    #   font would be enormous. Use fixed readable size (14pt) + word wrap.
+    #
+    # SINGLE-LINE mode (height-driven font, truncate):
+    #   Used for: table cells, headers, numbers, stat labels, province names.
+    #   Font size = (bbox_height - padding) * 1.25 → matches original scale.
+    #   Truncates with ellipsis if text overflows width.
+    #
+    # The word_count + ratio combination correctly handles edge cases:
+    #   - Single digit '3' (ratio=0.8, words=1) → single-line ✓
+    #   - 'New Infections' (ratio=3.8, words=2) → single-line ✓
+    #   - Long paragraph (ratio=2.0, words=12) → paragraph ✓
+
+    word_count   = len(text.split())
+    aspect_ratio = w / max(h, 1)
+    WRAP_ALWAYS  = {"title", "subtitle", "footer"}
+
+    is_paragraph = (word_count > 6 and aspect_ratio < 3.0) or rtype in WRAP_ALWAYS
+
+    if is_paragraph:
+        single_line = False
+        # Readable paragraph font: 14pt base, slightly wider boxes get larger
+        font_size = max(11, min(16, int(inner_w / 28)))
+    else:
+        single_line = True
+        # font_size already set by _size_from_height above
 
     font, lines, size = _wrap_and_reduce(
         draw, text, font_name, font_size, inner_w, inner_h,
