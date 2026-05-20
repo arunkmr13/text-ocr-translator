@@ -142,16 +142,22 @@ def _call_gemini(
 
 
 def _parse_json(raw: str) -> dict[str, Any]:
+    # Strip markdown code fences
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
+
+    # Attempt 1: direct parse
     try:
         return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: gemini-2.5-flash sometimes includes invalid backslash
+    # escapes in non-Latin text responses. Strip lone backslashes.
+    try:
+        sanitised = cleaned.replace("\\", " ")
+        return json.loads(sanitised)
     except json.JSONDecodeError as e:
         raise ValueError(f"Non-JSON response: {e}\nRaw: {raw[:400]}")
-
-
-# ---------------------------------------------------------------------------
-# Pass 1 prompt
-# ---------------------------------------------------------------------------
 
 def _prompt_pass1(language_result: LanguageResult | None) -> str:
     lang_hint = (
