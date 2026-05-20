@@ -2,7 +2,13 @@
 
 > Photograph any document in a foreign language. Get the English translation overlaid directly on the image — in seconds.
 
-Powered by Google Gemini Vision API · Free tier.
+![Python](https://img.shields.io/badge/Python-3.11-blue?style=flat-square)
+![FastAPI](https://img.shields.io/badge/FastAPI-latest-green?style=flat-square)
+![Gemini](https://img.shields.io/badge/Gemini-Vision_API-orange?style=flat-square)
+![Docker](https://img.shields.io/badge/Docker-ready-blue?style=flat-square)
+![Cost](https://img.shields.io/badge/Cost-Free_Tier-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-purple?style=flat-square)
+
 ---
 
 ## What It Does
@@ -14,7 +20,7 @@ Upload an image containing text in any language. The app:
 3. Translates everything to English
 4. Renders the English translation directly over the original image — preserving layout, tables, and structure
 
-Example: A Lao government health report with 18 provinces, statistics, and tables → fully translated overlay image + clean extracted text, all in under 90 seconds.
+**Example:** A Lao government health report with 18 provinces, statistics, and tables → fully translated overlay image + clean extracted text, all in under 90 seconds.
 
 ---
 
@@ -22,7 +28,7 @@ Example: A Lao government health report with 18 provinces, statistics, and table
 
 Traditional OCR tools extract text but lose all layout context. Translation tools accept text but don't know where it came from. This project combines both into a single pipeline — the output is an image you can actually read, not just a block of raw translated text.
 
-Use cases:
+**Use cases:**
 - Translating foreign government reports, medical documents, or infographics
 - Extracting structured table data from images in any language
 - Any workflow where someone receives image-based documents in a language they don't read
@@ -32,16 +38,16 @@ Use cases:
 ## Live Demo
 
 ```
-http://localhost:8001
+http://localhost:8000
 ```
 
-Upload any JPEG, PNG, or WebP image → click Translate Image → results appear in under 90 seconds.
+Upload any JPEG, PNG, or WebP image → click **Translate Image** → results appear in under 90 seconds.
 
 The UI shows:
-- Original and Translated Overlay images side by side
-- Source text (extracted, in original language) and English translation*as structured markdown
-- 4-step pipeline tracker showing real-time progress
-- Render complete toast showing exact time taken
+- **Original** and **Translated Overlay** images side by side
+- **Source text** (extracted, in original language) and **English translation** as structured markdown
+- **4-step pipeline tracker** showing real-time progress
+- **Render complete toast** showing exact time taken
 
 ---
 
@@ -83,7 +89,7 @@ Image Upload
 └─────────────────────────────────────┘
 ```
 
-Why two Gemini passes?
+**Why two Gemini passes?**
 Gemini has a response length limit. Asking for all bounding boxes in one call causes truncation on dense documents (tables with 18+ rows). Pass 1 handles metadata, Pass 2 handles table rows using a compact array format — preventing truncation while keeping a single API key.
 
 ---
@@ -103,16 +109,16 @@ Gemini has a response length limit. Asking for all bounding boxes in one call ca
 
 ## AI Model Details
 
-Primary: `gemini-flash-latest`
+**Primary:** `gemini-flash-latest`
 
-Automatic fallback chain (handles quota exhaustion gracefully):
+**Automatic fallback chain** (handles quota exhaustion gracefully):
 ```
 gemini-flash-latest → gemini-2.0-flash → gemini-2.5-flash → gemini-2.0-flash-lite
 ```
 
 Each model is tried in order. If one returns a 429 (rate limit), the code reads the `retryDelay` from Google's response and waits exactly that long before trying the next model — no wasted retries.
 
-Free tier limits: 1,500 requests/day · 15 requests/minute · $0 cost
+**Free tier limits:** 1,500 requests/day · 15 requests/minute · $0 cost
 
 ---
 
@@ -185,7 +191,7 @@ docker compose up --build
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn backend.main:app --reload
 # App at http://localhost:8000
@@ -193,18 +199,79 @@ uvicorn backend.main:app --reload
 
 ---
 
+## API Reference
+
+Auto-generated docs available at `http://localhost:8000/docs`
+
+### POST `/upload`
+
+Accepts an image and returns the translated overlay + extracted text.
+
+**Request**
+```
+Content-Type: multipart/form-data
+Body: file (JPEG / PNG / WebP, max 5 MB)
+```
+
+**curl example**
+```bash
+curl -X POST http://localhost:8000/upload \
+  -F "file=@document.jpg"
+```
+
+**Python example**
+```python
+import requests
+
+with open("document.jpg", "rb") as f:
+    response = requests.post(
+        "http://localhost:8000/upload",
+        files={"file": f}
+    )
+
+data = response.json()
+print(data["translated_text"])     # English translation
+print(data["detected_language"])   # ISO 639-1 code e.g. "lo", "th", "ar"
+print(data["region_count"])        # Number of text regions rendered
+print(data["translated_image"])    # Path to overlay image
+```
+
+**Response**
+```json
+{
+  "original_image":    "uploads/uuid.jpg",
+  "translated_image":  "outputs/uuid.jpg",
+  "extracted_text":    "# ສະພາບໄຂ້ຍຸງລາຍ\n...",
+  "translated_text":   "# Dengue Fever Situation\n...",
+  "detected_language": "lo",
+  "region_count":      93,
+  "warning":           null
+}
+```
+
+**Error codes**
+
+| Code | Meaning |
+|---|---|
+| 413 | File exceeds the 5 MB size limit |
+| 415 | Unsupported file type — only JPEG, PNG, WebP accepted |
+| 422 | OCR failed — Gemini API error or no text found in image |
+| 429 | Rate limit exceeded — 20 requests per 60 seconds per IP |
+
+---
+
 ## Key Engineering Decisions
 
-Why Gemini Vision instead of Tesseract + Google Translate?
+**Why Gemini Vision instead of Tesseract + Google Translate?**
 Tesseract requires language packs installed per language, struggles with non-Latin scripts, and has no table understanding. Gemini Vision reads any script out of the box, understands document structure, and returns both translation and spatial coordinates in a single API call.
 
-Why vanilla JS instead of React?
+**Why vanilla JS instead of React?**
 The UI state is simple — one upload, one result. A framework would add build complexity with no benefit. Vanilla JS with `Promise.all` handles the concurrent fetch + animation correctly with zero dependencies.
 
-Why two Gemini passes instead of one?
+**Why two Gemini passes instead of one?**
 Gemini's response token limit causes truncation on dense documents. A single pass requesting all 90+ bounding boxes for an 18-province table gets cut off mid-response. Pass 1 (metadata) + Pass 2 (table rows in compact array format) guarantees complete coverage without hitting limits.
 
-Why height-driven font sizing?
+**Why height-driven font sizing?**
 The English overlay text must match the visual weight of the original language text. Since Gemini returns bounding boxes derived from the original glyph heights, using `font_size = (bbox_height - padding) × 1.25` produces cap-heights that match the original text scale — regardless of language or document size.
 
 ---
@@ -219,15 +286,16 @@ The English overlay text must match the visual weight of the original language t
 | Disk usage | Auto-cleanup of uploads + outputs after 1 hour |
 | Quota exhaustion | 4-model fallback chain with retryDelay-aware sleep |
 | Large tables | Two-pass Gemini strategy prevents response truncation |
+| Invalid JSON | Sanitisation pass handles malformed escapes from gemini-2.5-flash |
 
 ---
 
 ## Limitations & Known Constraints
 
-- Bounding box accuracy — Gemini estimates normalised coordinates rather than computing pixel-precise positions. Overlay alignment is approximate (±5% of image dimensions).
-- Processing time — Two Gemini API calls per request = ~60-90 seconds total. Bottleneck is network latency to Google's API, not local computation.
-- Free tier quota — 1,500 requests/day. Each translation uses 2 calls, so effectively 750 translations/day.
-- Overlay on complex backgrounds — Semi-transparent fill boxes work well on solid/gradient backgrounds. Highly textured backgrounds may reduce overlay legibility.
+- **Bounding box accuracy** — Gemini estimates normalised coordinates rather than computing pixel-precise positions. Overlay alignment is approximate (±5% of image dimensions).
+- **Processing time** — Two Gemini API calls per request = ~60-90 seconds total. Bottleneck is network latency to Google's API, not local computation.
+- **Free tier quota** — 1,500 requests/day. Each translation uses 2 calls, so effectively 750 translations/day.
+- **Overlay on complex backgrounds** — Semi-transparent fill boxes work well on solid/gradient backgrounds. Highly textured backgrounds may reduce overlay legibility.
 
 ---
 
@@ -239,4 +307,18 @@ The English overlay text must match the visual weight of the original language t
 
 ---
 
-```
+## Related Projects
+
+- [figcaption](https://github.com/arunkmr13/figcaption) — AI-powered image caption generator
+- [docx-report-engine](https://github.com/arunkmr13/docx-report-engine) — Automated Word document report generation
+- [whiteboard-digitiser](https://github.com/arunkmr13/whiteboard-digitiser) — Hand-drawn whiteboard → Mermaid diagram
+
+---
+
+## License
+
+MIT — free to use, modify, and distribute.
+
+---
+
+Built by [Arun Kumar](https://github.com/arunkmr13)
